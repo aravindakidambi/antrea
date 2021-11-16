@@ -1,6 +1,6 @@
 # Antrea Mulit-Cluster Controller Installation
 
-## Prepare Docker Image
+## Prepare Antrea Multi-Cluster Image
 
 For Antrea multi-cluster, there will be only one image `antrea/antrea-multicluster-controller:latest` 
 for all controllers, you need to prepare a docker image before setup MCS component,
@@ -8,9 +8,14 @@ you can follow below steps to get the image ready on your local cluster.
 
 1. Go to `antrea/multi-cluster` folder, run `make docker-build`, you will get a new image
   named `antrea/antrea-multicluster-controller:latest` locally.
-2. Run `docker save antrea/antrea-multicluster-controller:latest > antrea-mcs.tar` to save the image.
-3. Copy the image file `antrea-mcs.tar` to the nodes of your local cluster
-4. Run `docker load < antrea-mcs.tar` in each node of your local cluster.
+
+### Load Antrea Multi-Cluster image to a K8 cluster
+1. Run `docker save antrea/antrea-multicluster-controller:latest > antrea-mcs.tar` to save the image.
+2. Copy the image file `antrea-mcs.tar` to the nodes of your local cluster
+3. Run `docker load < antrea-mcs.tar` in each node of your local cluster.
+
+### Load Antrea Multi-Cluster image to kind cluster
+1. kind load docker-image antrea/antrea-multicluster-controller:latest --name=<kind-cluster-name>
 
 ## Install Mulit-Cluster Controller
 
@@ -31,22 +36,6 @@ kubectl create ns antrea-mcs-ns
 hack/generate-manifest.sh -l antrea-mcs-ns | kubectl apply -f -
 ```
 
-You will see a `ServiceAccount` named `antrea-multicluster-member-access-sa` in lead cluster after
-apply the MCS controller manifest, then create a secret associated with this `ServiceAccount` so
-the secret can be exported and used in member cluster later.
-
-```yml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: leader-access-token
-  namespace: antrea-mcs-ns
-  annotations:
-    kubernetes.io/service-account.name: antrea-multicluster-member-access-sa
-type: kubernetes.io/service-account-token
-```
-
-Get secret data via `kubectl get secret leader-access-token -n antrea-mcs-ns -o yaml > leader-access-token.yml`
 ### Installation in Member Cluster
 
 You can simply run below command to install MCS controller to member cluster.
@@ -54,19 +43,70 @@ You can simply run below command to install MCS controller to member cluster.
 kubectl apply -f build/yamls/antrea-multicluster-member-only.yml
 ```
 
-Copy file `leader-access-token.yml` from leader cluster, update the namespace to `default`
-where MCS controller is deployed in member cluster and create it via `kubectl create -f leader-access-token.yml`
-
-## Setup ClusterSet
+## ClusterSet
 
 In an Antrea multi-cluster cluster set, there will be at least one leader cluster and two
-member clusters. At first, all clusters in the cluster set need to use `ClusterClaim` to
-claim itself as a member of a cluster set. A leader cluster will define `ClusterSet` which
-includes leader and member clusters. below is a sample to create a cluster set with a cluster
-set id `test-clusterset` which has two member clusters with cluster id `test-cluster-east`
-and `test-cluster-west`, one leader cluster with id `test-cluster-leader`.
+member clusters. In the below examples we will use cluster set id `test-clusterset` which
+has two member clusters with cluster id `test-cluster-east`, `test-cluster-west` and one
+leader cluster with id `test-cluster-leader`.
+
+### Setting up access to leader cluster
+We first need to setup access from all member clusters into the leader cluster's API server.
+We recommend creating one service account for each member for fine-grained access control.
+
+For example:
+
+1. Apply the following yaml in the leader cluster to setup access for
+`test-cluster-east`.
+
+```yml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: member-east-access-sa
+  namespace: antrea-mcs-ns
+---
+apiVersion: v1
+kind: Secret
+metadata:
+    name: member-east-access-token
+    namespace: antrea-mcs-ns
+    annotations:
+      kubernetes.io/service-account.name: member-east-access-sa
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: member-east-access-rolebinding
+  namespace: antrea-mcs-ns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: antrea-multicluster-member-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: member-east-access-sa
+    namespace: antrea-mcs-ns
+```
+2. Do the same for the other member `test-cluster-west`.
+3. Now copy the access token into the respective member clusters. E.g.
+```
+# On leader cluster
+kubectl get secret member-east-access-token -n antrea-mcs-ns -o yaml | grep -w -e '^apiVersion' -e '^data' -e '^metadata' -e '^ *name:' -e '^kind' -e crt -e 'token:' -e '^type' | sed -e 's/kubernetes.io\/service-account-token/mcs-custom/g' >  member-east-access-token.yml
+# On test-cluster-east cluster
+kubectl apply -f member-east-access-token.yml
+```
+4. Similarly copy the token for `test-cluster-west`.
+
+### Setting up ClusterSet
+
+All clusters in the cluster set need to use `ClusterClaim` to claim itself as a member
+of a cluster set. A leader cluster will define `ClusterSet` which includes leader and
+member clusters.
 
 * Create below `ClusterClaim` and `ClusterSet` in the member cluster `test-cluster-east`.
+  NOTE: Use the correct server address for the leader cluster below instead of `https://172.18.0.2:6443`
 
 ```yaml
 apiVersion: multicluster.crd.antrea.io/v1alpha1
@@ -89,18 +129,19 @@ apiVersion: multicluster.crd.antrea.io/v1alpha1
 kind: ClusterSet
 metadata:
     name: test-clusterset
-    namespace: antrea-mcs-ns
+    namespace: default
 spec:
     leaders:
       - clusterID: test-cluster-leader
-        secret: "leader-access-token"
+        secret: "member-east-access-token"
         server: "https://172.18.0.2:6443"
     members:
       - clusterID: test-cluster-east
     namespace: antrea-mcs-ns
 ```
 
-* Create below `ClusterClaim` and `ClusterSet` in the member cluster `test-cluster-west`.
+* Create below `ClusterClaim` and `ClusterSet` in the member cluster `test-cluster-west`. 
+  NOTE: Use the correct server address for the leader cluster below instead of `https://172.18.0.2:6443`
 
 ```yaml
 apiVersion: multicluster.crd.antrea.io/v1alpha1
@@ -127,7 +168,7 @@ metadata:
 spec:
     leaders:
       - clusterID: test-cluster-leader
-        secret: "leader-access-token"
+        secret: "meber-west-access-token"
         server: "https://172.18.0.2:6443"
     members:
       - clusterID: test-cluster-west
@@ -167,9 +208,9 @@ spec:
       - clusterID: test-cluster-leader
     members:
       - clusterID: test-cluster-east
-        serviceAccount: "member-east-account"
+        serviceAccount: "member-east-access-sa"
       - clusterID: test-cluster-west
-        serviceAccount: "member-west-account"
+        serviceAccount: "member-west-access-sa"
     namespace: antrea-mcs-ns
 ```
 

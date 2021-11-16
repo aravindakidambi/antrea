@@ -49,5 +49,3 @@ patchesJson6902:
 resources:
   - webhook_rbac.yaml
   - member_cluster_role.yaml
-  - member_cluster_rolebinding.yaml
-  - member_cluster_serviceaccount.yaml
