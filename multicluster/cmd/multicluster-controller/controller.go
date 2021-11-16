@@ -19,6 +19,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -151,10 +152,11 @@ func run(o *Options) error {
 		setupLog.Error(err, "unable to create controller", "controller", "MemberClusterAnnounce")
 		return fmt.Errorf("unable to create MemberClusterAnnounce controller, err: %v", err)
 	}
-	if err = (&multiclusterv1alpha1.MemberClusterAnnounce{}).SetupWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "MemberClusterAnnounce")
-		return fmt.Errorf("unable to create MemberClusterAnnounce webhook, err: %v", err)
-	}
+	hookServer := mgr.GetWebhookServer()
+	hookServer.Register("/validate-multicluster-crd-antrea-io-v1alpha1-memberclusterannounce",
+		&webhook.Admission{Handler: &memberClusterAnnounceValidator{
+			Client:    mgr.GetClient(),
+			namespace: env.GetPodNamespace()}})
 
 	remoteMgr := &(clusterSetReconciler.RemoteClusterManager)
 	if o.leader {
